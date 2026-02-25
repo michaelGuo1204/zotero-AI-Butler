@@ -47,7 +47,12 @@ export enum TaskStatus {
 /**
  * 任务类型枚举
  */
-export type TaskType = "summary" | "imageSummary" | "mindmap";
+export type TaskType =
+  | "summary"
+  | "imageSummary"
+  | "mindmap"
+  | "tableFill"
+  | "review";
 
 /**
  * 任务项接口
@@ -73,6 +78,10 @@ export interface TaskItem {
     summaryMode?: string;
     forceOverwrite?: boolean;
   };
+  /** 综述任务参数 */
+  collectionId?: number;
+  pdfAttachmentIds?: number[];
+  reviewName?: string;
 }
 
 /**
@@ -550,6 +559,290 @@ export class TaskQueueManager {
    */
   public getMindmapTasks(): TaskItem[] {
     return this.getAllTasks().filter((t) => t.taskType === "mindmap");
+  }
+
+  /**
+   * 添加填表任务
+   */
+  public async addTableFillTask(item: Zotero.Item): Promise<string> {
+    const taskId = `table-task-${item.id}`;
+
+    if (this.tasks.has(taskId)) {
+      ztoolkit.log(`填表任务已存在: ${taskId}`);
+      return taskId;
+    }
+
+    const task: TaskItem = {
+      id: taskId,
+      itemId: item.id,
+      title: item.getField("title") as string,
+      status: TaskStatus.PRIORITY,
+      progress: 0,
+      createdAt: new Date(),
+      retryCount: 0,
+      maxRetries: 2,
+      taskType: "tableFill",
+      workflowStage: "等待开始",
+    };
+
+    this.tasks.set(taskId, task);
+    await this.saveToStorage();
+
+    ztoolkit.log(`添加填表任务: ${task.title} (${taskId})`);
+
+    // 立即执行
+    this.executeTableFillTask(taskId).catch((e) => {
+      ztoolkit.log(`填表任务执行失败: ${e}`);
+    });
+
+    return taskId;
+  }
+
+  /**
+   * 执行填表任务
+   */
+  private async executeTableFillTask(taskId: string): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.taskType !== "tableFill") return;
+
+    if (
+      task.status === TaskStatus.PROCESSING ||
+      task.status === TaskStatus.COMPLETED
+    )
+      return;
+
+    task.status = TaskStatus.PROCESSING;
+    task.startedAt = new Date();
+    task.progress = 0;
+    task.workflowStage = "正在初始化";
+    this.processingTasks.add(taskId);
+    await this.saveToStorage();
+
+    try {
+      const item = await Zotero.Items.getAsync(task.itemId);
+      if (!item) throw new Error("文献条目不存在");
+
+      const { LiteratureReviewService } =
+        await import("./literatureReviewService");
+      const { getPref } = await import("../utils/prefs");
+      const { DEFAULT_TABLE_TEMPLATE, DEFAULT_TABLE_FILL_PROMPT } =
+        await import("../utils/prompts");
+
+      const tableTemplate =
+        (getPref("tableTemplate" as any) as string) || DEFAULT_TABLE_TEMPLATE;
+      const fillPrompt =
+        (getPref("tableFillPrompt" as any) as string) ||
+        DEFAULT_TABLE_FILL_PROMPT;
+
+      task.workflowStage = "正在提取 PDF";
+      task.progress = 20;
+      this.notifyProgress(taskId, 20, "正在提取 PDF");
+
+      // 找到 PDF 附件
+      const attachmentIDs = (item as any).getAttachments?.() || [];
+      let pdfAtt: Zotero.Item | null = null;
+      for (const attId of attachmentIDs) {
+        const att = await Zotero.Items.getAsync(attId);
+        if (att && (att as any).isPDFAttachment?.()) {
+          pdfAtt = att;
+          break;
+        }
+      }
+
+      if (!pdfAtt) throw new Error("该条目没有 PDF 附件");
+
+      task.workflowStage = "正在 AI 填表";
+      task.progress = 40;
+      this.notifyProgress(taskId, 40, "正在 AI 填表");
+
+      const tableContent = await LiteratureReviewService.fillTableForSinglePDF(
+        item,
+        pdfAtt,
+        tableTemplate,
+        fillPrompt,
+      );
+
+      task.workflowStage = "正在保存";
+      task.progress = 80;
+      this.notifyProgress(taskId, 80, "正在保存");
+
+      await LiteratureReviewService.saveTableNote(item, tableContent);
+
+      task.status = TaskStatus.COMPLETED;
+      task.progress = 100;
+      task.workflowStage = "完成";
+      task.completedAt = new Date();
+      task.duration = Math.floor(
+        (task.completedAt.getTime() - task.startedAt!.getTime()) / 1000,
+      );
+
+      ztoolkit.log(`填表任务完成: ${task.title} (耗时${task.duration}秒)`);
+      this.notifyComplete(taskId, true);
+    } catch (error: any) {
+      task.error = error?.message || "未知错误";
+      task.workflowStage = "失败";
+      task.retryCount++;
+      if (task.retryCount < task.maxRetries) {
+        task.status = TaskStatus.PENDING;
+        task.progress = 0;
+      } else {
+        task.status = TaskStatus.FAILED;
+        task.completedAt = new Date();
+      }
+      this.notifyComplete(taskId, false, task.error);
+    } finally {
+      this.processingTasks.delete(taskId);
+      await this.saveToStorage();
+    }
+  }
+
+  /**
+   * 添加综述任务
+   */
+  public async addReviewTask(
+    collection: Zotero.Collection,
+    pdfAttachments: Zotero.Item[],
+    reviewName: string,
+    prompt?: string,
+  ): Promise<string> {
+    const taskId = `review-task-${collection.id}`;
+
+    // 若已存在则更新
+    if (this.tasks.has(taskId)) {
+      const existing = this.tasks.get(taskId)!;
+      if (existing.status === TaskStatus.PROCESSING) {
+        ztoolkit.log(`综述任务正在执行: ${taskId}`);
+        return taskId;
+      }
+      this.tasks.delete(taskId);
+    }
+
+    const task: TaskItem = {
+      id: taskId,
+      itemId: collection.id,
+      title: reviewName,
+      status: TaskStatus.PRIORITY,
+      progress: 0,
+      createdAt: new Date(),
+      retryCount: 0,
+      maxRetries: 1,
+      taskType: "review",
+      workflowStage: "等待开始",
+      collectionId: collection.id,
+      pdfAttachmentIds: pdfAttachments.map((p) => p.id),
+      reviewName,
+    };
+
+    this.tasks.set(taskId, task);
+    await this.saveToStorage();
+
+    ztoolkit.log(`添加综述任务: ${task.title} (${taskId})`);
+
+    // 立即执行
+    this.executeReviewTask(taskId, prompt).catch((e) => {
+      ztoolkit.log(`综述任务执行失败: ${e}`);
+    });
+
+    return taskId;
+  }
+
+  /**
+   * 执行综述任务
+   */
+  private async executeReviewTask(
+    taskId: string,
+    prompt?: string,
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.taskType !== "review") return;
+
+    if (
+      task.status === TaskStatus.PROCESSING ||
+      task.status === TaskStatus.COMPLETED
+    )
+      return;
+
+    task.status = TaskStatus.PROCESSING;
+    task.startedAt = new Date();
+    task.progress = 0;
+    task.workflowStage = "正在初始化";
+    this.processingTasks.add(taskId);
+    await this.saveToStorage();
+
+    try {
+      if (!task.collectionId || !task.pdfAttachmentIds?.length) {
+        throw new Error("综述任务参数不完整");
+      }
+
+      const collection = Zotero.Collections.get(
+        task.collectionId,
+      ) as Zotero.Collection;
+      if (!collection) throw new Error("分类不存在");
+
+      // 加载 PDF 附件
+      const pdfAttachments: Zotero.Item[] = [];
+      for (const attId of task.pdfAttachmentIds) {
+        const att = await Zotero.Items.getAsync(attId);
+        if (att) pdfAttachments.push(att);
+      }
+
+      if (pdfAttachments.length === 0) throw new Error("没有可用的 PDF 附件");
+
+      const { LiteratureReviewService } =
+        await import("./literatureReviewService");
+
+      const reviewName =
+        task.reviewName || `综述 ${new Date().toISOString().slice(2, 10)}`;
+
+      await LiteratureReviewService.generateReview(
+        collection,
+        pdfAttachments,
+        reviewName,
+        prompt || "",
+        (message: string, progress: number) => {
+          task.progress = progress;
+          task.workflowStage = message;
+          this.notifyProgress(taskId, progress, message);
+          if (progress % 20 === 0 || progress === 100) {
+            this.saveToStorage().catch(() => {});
+          }
+        },
+      );
+
+      task.status = TaskStatus.COMPLETED;
+      task.progress = 100;
+      task.workflowStage = "完成";
+      task.completedAt = new Date();
+      task.duration = Math.floor(
+        (task.completedAt.getTime() - task.startedAt!.getTime()) / 1000,
+      );
+
+      ztoolkit.log(`综述任务完成: ${task.title} (耗时${task.duration}秒)`);
+      this.notifyComplete(taskId, true);
+    } catch (error: any) {
+      task.error = error?.message || "未知错误";
+      task.workflowStage = "失败";
+      task.status = TaskStatus.FAILED;
+      task.completedAt = new Date();
+      this.notifyComplete(taskId, false, task.error);
+    } finally {
+      this.processingTasks.delete(taskId);
+      await this.saveToStorage();
+    }
+  }
+
+  /**
+   * 获取填表任务
+   */
+  public getTableFillTasks(): TaskItem[] {
+    return this.getAllTasks().filter((t) => t.taskType === "tableFill");
+  }
+
+  /**
+   * 获取综述任务
+   */
+  public getReviewTasks(): TaskItem[] {
+    return this.getAllTasks().filter((t) => t.taskType === "review");
   }
 
   /**

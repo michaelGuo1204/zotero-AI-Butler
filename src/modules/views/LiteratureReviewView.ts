@@ -25,7 +25,12 @@ import {
   createStyledButton,
   createSelect,
 } from "./ui/components";
-import { DEFAULT_LITERATURE_REVIEW_PROMPT } from "../../utils/prompts";
+import {
+  DEFAULT_LITERATURE_REVIEW_PROMPT,
+  DEFAULT_TABLE_TEMPLATE,
+  DEFAULT_TABLE_FILL_PROMPT,
+} from "../../utils/prompts";
+import { getPref } from "../../utils/prefs";
 
 /**
  * 提示词预设接口
@@ -82,6 +87,7 @@ export class LiteratureReviewView extends BaseView {
   private treeContainer: HTMLElement | null = null;
   private selectedCountElement: HTMLElement | null = null;
   private generateButton: HTMLButtonElement | null = null;
+  private fillTableButton: HTMLButtonElement | null = null;
 
   // 预设管理
   private presets: PromptPreset[] = [];
@@ -179,7 +185,7 @@ export class LiteratureReviewView extends BaseView {
       textContent: "综述名称",
     });
 
-    const defaultName = `AI管家综述-${new Date().toISOString().slice(0, 10)}`;
+    const defaultName = `综述 ${new Date().toISOString().slice(2, 10)}`;
     this.nameInput = createInput(
       "review-name-input",
       "text",
@@ -388,6 +394,12 @@ export class LiteratureReviewView extends BaseView {
       MainWindow.getInstance().switchTab("dashboard");
     });
 
+    // 填表按钮
+    this.fillTableButton = createStyledButton("📋 填表", "#4caf50", "medium");
+    this.fillTableButton.addEventListener("click", () =>
+      this.handleFillTables(),
+    );
+
     // 生成按钮
     this.generateButton = createStyledButton(
       "🚀 生成综述",
@@ -397,6 +409,7 @@ export class LiteratureReviewView extends BaseView {
     this.generateButton.addEventListener("click", () => this.handleGenerate());
 
     buttonContainer.appendChild(cancelButton);
+    buttonContainer.appendChild(this.fillTableButton);
     buttonContainer.appendChild(this.generateButton);
 
     footer.appendChild(this.selectedCountElement);
@@ -609,6 +622,63 @@ export class LiteratureReviewView extends BaseView {
 
     nodeElement.appendChild(checkbox);
     nodeElement.appendChild(label);
+
+    // 状态标识
+    const tags: Array<{ tag: string }> = (node.item as any).getTags?.() || [];
+    const hasReviewed = tags.some((t) => t.tag === "AI-Reviewed");
+    const hasTable = tags.some((t) => t.tag === "AI-Table");
+
+    // 检查子笔记中是否有 AI-Table 标签
+    const noteIDs: number[] = (node.item as any).getNotes?.() || [];
+    const hasTableNote = hasTable;
+    if (!hasTableNote && noteIDs.length > 0) {
+      // 异步检查，但先标记可能有的
+      void (async () => {
+        for (const nid of noteIDs) {
+          try {
+            const n = await Zotero.Items.getAsync(nid);
+            if (!n) continue;
+            const noteTags: Array<{ tag: string }> =
+              (n as any).getTags?.() || [];
+            if (noteTags.some((t) => t.tag === "AI-Table")) {
+              // 动态添加标识
+              const tableBadge = this.createElement("span", {
+                styles: {
+                  marginLeft: "6px",
+                  padding: "1px 6px",
+                  borderRadius: "3px",
+                  fontSize: "10px",
+                  background: "rgba(76, 175, 80, 0.15)",
+                  color: "#4caf50",
+                  flexShrink: "0",
+                },
+                textContent: "📊 已填表",
+              });
+              nodeElement.insertBefore(tableBadge, label.nextSibling);
+              break;
+            }
+          } catch {
+            // skip
+          }
+        }
+      })();
+    }
+
+    if (hasReviewed) {
+      const reviewedBadge = this.createElement("span", {
+        styles: {
+          marginLeft: "6px",
+          padding: "1px 6px",
+          borderRadius: "3px",
+          fontSize: "10px",
+          background: "rgba(99, 102, 241, 0.15)",
+          color: "#6366f1",
+          flexShrink: "0",
+        },
+        textContent: "✅ 已综述",
+      });
+      nodeElement.appendChild(reviewedBadge);
+    }
 
     // 悬停效果
     nodeElement.addEventListener("mouseenter", () => {
@@ -868,64 +938,109 @@ export class LiteratureReviewView extends BaseView {
 
     const reviewName =
       this.nameInput.value.trim() ||
-      `AI管家综述-${new Date().toISOString().slice(0, 10)}`;
+      `综述 ${new Date().toISOString().slice(2, 10)}`;
     const prompt =
       this.promptTextarea.value.trim() || DEFAULT_LITERATURE_REVIEW_PROMPT;
 
-    // 禁用生成按钮
-    if (this.generateButton) {
-      this.generateButton.disabled = true;
-      this.generateButton.textContent = "⏳ 正在生成...";
-    }
-
     try {
-      // 调用综述服务生成报告
-      const reportItem = await LiteratureReviewService.generateReview(
+      // 通过任务队列入队
+      const { TaskQueueManager } = await import("../taskQueue");
+      const manager = TaskQueueManager.getInstance();
+      await manager.addReviewTask(
         this.collection,
         selectedPdfs,
         reviewName,
         prompt,
-        (message: string, progress: number) => {
-          if (this.generateButton) {
-            this.generateButton.textContent = `⏳ ${message}`;
-          }
-        },
       );
 
-      // 生成成功
       new ztoolkit.ProgressWindow("AI Butler", {
         closeOnClick: true,
-        closeTime: 5000,
+        closeTime: 3000,
       })
         .createLine({
-          text: `✅ 综述已生成: ${reviewName}`,
+          text: `✅ 综述任务已加入队列: ${reviewName}`,
           type: "success",
         })
         .show();
 
-      // 在 Zotero 中选中新创建的报告条目
-      const zoteroPane = Zotero.getActiveZoteroPane();
-      await zoteroPane.selectItem(reportItem.id);
-
-      // 返回仪表盘
-      MainWindow.getInstance().switchTab("dashboard");
+      // 跳转到任务队列界面
+      MainWindow.getInstance().switchTab("tasks");
     } catch (error: any) {
-      ztoolkit.log("[AI-Butler] 生成综述失败:", error);
+      ztoolkit.log("[AI-Butler] 添加综述任务失败:", error);
       new ztoolkit.ProgressWindow("AI Butler", {
         closeOnClick: true,
         closeTime: 5000,
       })
         .createLine({
-          text: `❌ 生成失败: ${error.message || error}`,
+          text: `❌ 添加失败: ${error.message || error}`,
           type: "error",
         })
         .show();
-    } finally {
-      // 恢复生成按钮
-      if (this.generateButton) {
-        this.generateButton.disabled = false;
-        this.generateButton.textContent = "🚀 生成综述";
+    }
+  }
+
+  /**
+   * 处理逐篇填表
+   */
+  private async handleFillTables(): Promise<void> {
+    if (!this.collection) return;
+
+    const selectedPdfs = this.collectSelectedPdfAttachments();
+    if (selectedPdfs.length === 0) {
+      new ztoolkit.ProgressWindow("AI Butler", {
+        closeOnClick: true,
+        closeTime: 3000,
+      })
+        .createLine({
+          text: "请至少选择一个 PDF",
+          type: "error",
+        })
+        .show();
+      return;
+    }
+
+    try {
+      const { TaskQueueManager } = await import("../taskQueue");
+      const manager = TaskQueueManager.getInstance();
+
+      // 为每个选中的 PDF 的父条目创建填表任务
+      const addedItems = new Set<number>();
+      let count = 0;
+      for (const pdfAtt of selectedPdfs) {
+        const parentID = pdfAtt.parentID;
+        if (parentID && !addedItems.has(parentID)) {
+          addedItems.add(parentID);
+          const parentItem = await Zotero.Items.getAsync(parentID);
+          if (parentItem) {
+            await manager.addTableFillTask(parentItem);
+            count++;
+          }
+        }
       }
+
+      new ztoolkit.ProgressWindow("AI Butler", {
+        closeOnClick: true,
+        closeTime: 3000,
+      })
+        .createLine({
+          text: `✅ 已添加 ${count} 个填表任务到队列`,
+          type: "success",
+        })
+        .show();
+
+      // 跳转到任务队列界面
+      MainWindow.getInstance().switchTab("tasks");
+    } catch (error: any) {
+      ztoolkit.log("[AI-Butler] 添加填表任务失败:", error);
+      new ztoolkit.ProgressWindow("AI Butler", {
+        closeOnClick: true,
+        closeTime: 5000,
+      })
+        .createLine({
+          text: `❌ 添加失败: ${error.message || error}`,
+          type: "error",
+        })
+        .show();
     }
   }
 

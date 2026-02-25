@@ -48,7 +48,11 @@ let currentChatState: ChatState = {
   savedPairIds: new Set(),
 };
 
-type SidebarAutoRefreshTarget = "summary" | "imageSummary" | "mindmap";
+type SidebarAutoRefreshTarget =
+  | "summary"
+  | "imageSummary"
+  | "mindmap"
+  | "table";
 
 let sidebarContext: {
   doc: Document;
@@ -77,7 +81,7 @@ function parseTaskTarget(taskId: string): {
   itemId: number;
   target: SidebarAutoRefreshTarget;
 } | null {
-  const match = /^(task|img-task|mindmap-task)-(\d+)$/.exec(taskId);
+  const match = /^(task|img-task|mindmap-task|table-task)-(\d+)$/.exec(taskId);
   if (!match) return null;
   const itemId = Number(match[2]);
   if (!Number.isFinite(itemId)) return null;
@@ -87,7 +91,9 @@ function parseTaskTarget(taskId: string): {
       ? "imageSummary"
       : match[1] === "mindmap-task"
         ? "mindmap"
-        : "summary";
+        : match[1] === "table-task"
+          ? "table"
+          : "summary";
 
   return { itemId, target };
 }
@@ -151,6 +157,16 @@ async function runSidebarRefresh(): Promise<void> {
     if (mindmapContainer) {
       mindmapContainer.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">正在刷新...</div>`;
       await loadMindmapContent(doc, item, mindmapContainer);
+    }
+  }
+
+  if (targets.includes("table")) {
+    const tableContent = doc.getElementById(
+      "ai-butler-table-content",
+    ) as HTMLElement | null;
+    if (tableContent) {
+      tableContent.innerHTML = `<div style="color: #999; text-align: center; padding: 10px;">正在刷新...</div>`;
+      await loadTableContent(item, tableContent);
     }
   }
 }
@@ -271,6 +287,7 @@ function renderItemPaneSection(
   // 渲染各个区块
   renderActionButtons(body, doc, item, handleOpenAIChat);
   renderNoteSection(body, doc, item);
+  renderTableSection(body, doc, item);
   renderImageSummarySection(body, doc, item);
   renderMindmapSection(body, doc, item);
   renderChatArea(body, doc, item);
@@ -789,6 +806,308 @@ function renderNoteSection(
 
   // 异步加载笔记内容
   loadNoteContent(doc, item, noteContent);
+}
+
+/**
+ * 加载文献表格内容
+ */
+async function loadTableContent(
+  item: Zotero.Item,
+  container: HTMLElement,
+): Promise<void> {
+  try {
+    const { LiteratureReviewService } =
+      await import("./literatureReviewService");
+    const tableContent = await LiteratureReviewService.findTableNote(item);
+
+    if (tableContent) {
+      // 将 Markdown 表格简单渲染为 HTML
+      const { marked } = await import("marked");
+      marked.setOptions({ gfm: true, breaks: true });
+      const html = marked.parse(tableContent) as string;
+      container.innerHTML = html;
+      // 适配表格样式
+      const tables = container.querySelectorAll("table");
+      tables.forEach((table: Element) => {
+        (table as HTMLElement).style.cssText = `
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 12px;
+          margin: 4px 0;
+        `;
+        table.querySelectorAll("th, td").forEach((cell: Element) => {
+          (cell as HTMLElement).style.cssText = `
+            border: 1px solid rgba(128, 128, 128, 0.3);
+            padding: 4px 8px;
+            text-align: left;
+          `;
+        });
+        table.querySelectorAll("th").forEach((th: Element) => {
+          (th as HTMLElement).style.fontWeight = "600";
+          (th as HTMLElement).style.background = "rgba(128, 128, 128, 0.1)";
+        });
+      });
+    } else {
+      container.innerHTML = `<div style="color: #9e9e9e; font-size: 12px; text-align: center; padding: 12px;">暂无填表数据</div>`;
+    }
+  } catch (error) {
+    ztoolkit.log("[AI-Butler] 加载表格内容失败:", error);
+    container.innerHTML = `<div style="color: #9e9e9e; font-size: 12px; text-align: center; padding: 12px;">加载失败</div>`;
+  }
+}
+
+/**
+ * 渲染文献表格区域
+ */
+function renderTableSection(
+  body: HTMLElement,
+  doc: Document,
+  item: Zotero.Item,
+): void {
+  const tableSection = doc.createElement("div");
+  tableSection.className = "ai-butler-table-section";
+  tableSection.style.cssText = `
+    margin-bottom: 12px;
+    margin-top: 12px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  `;
+
+  // 标题栏（可折叠）
+  const tableHeader = doc.createElement("div");
+  tableHeader.style.cssText = `
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: rgba(76, 175, 80, 0.1);
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid rgba(76, 175, 80, 0.2);
+  `;
+
+  const tableTitle = doc.createElement("span");
+  tableTitle.style.cssText = `
+    font-weight: 500;
+    font-size: 12px;
+    color: inherit;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  `;
+  tableTitle.innerHTML = `📊 <span>文献综述</span>`;
+
+  // 异步加载综述状态徽章
+  void (async () => {
+    const itemTags: Array<{ tag: string }> = (item as any).getTags?.() || [];
+    const isReviewed = itemTags.some(
+      (t: { tag: string }) => t.tag === "AI-Reviewed",
+    );
+
+    let hasTable = false;
+    const subNoteIDs: number[] = (item as any).getNotes?.() || [];
+    for (const nid of subNoteIDs) {
+      try {
+        const n = await Zotero.Items.getAsync(nid);
+        if (!n) continue;
+        const nTags: Array<{ tag: string }> = (n as any).getTags?.() || [];
+        if (nTags.some((t: { tag: string }) => t.tag === "AI-Table")) {
+          hasTable = true;
+          break;
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    let badges = "";
+    if (hasTable) {
+      badges += `<span style="margin-left:6px;padding:1px 5px;border-radius:3px;font-size:9px;background:rgba(76,175,80,0.15);color:#4caf50;">📊 已填表</span>`;
+    }
+    if (isReviewed) {
+      badges += `<span style="margin-left:4px;padding:1px 5px;border-radius:3px;font-size:9px;background:rgba(99,102,241,0.15);color:#6366f1;">✅ 已综述</span>`;
+    }
+    if (badges) {
+      const titleSpan = tableTitle.querySelector("span");
+      if (titleSpan) {
+        titleSpan.innerHTML = `文献综述${badges}`;
+      }
+    }
+  })();
+
+  // 操作按钮容器
+  const tableBtnContainer = doc.createElement("div");
+  tableBtnContainer.style.cssText = `
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  `;
+  tableBtnContainer.addEventListener("click", (e: Event) =>
+    e.stopPropagation(),
+  );
+
+  // 重新填表按钮
+  const refillBtn = doc.createElement("button");
+  refillBtn.textContent = "🔄 重新生成";
+  refillBtn.title = "重新填表";
+  refillBtn.style.cssText = `
+    padding: 2px 8px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 11px;
+    color: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    white-space: nowrap;
+  `;
+  refillBtn.addEventListener("mouseenter", () => {
+    refillBtn.style.opacity = "1";
+    refillBtn.style.background = "rgba(128, 128, 128, 0.2)";
+  });
+  refillBtn.addEventListener("mouseleave", () => {
+    refillBtn.style.opacity = "0.7";
+    refillBtn.style.background = "transparent";
+  });
+  refillBtn.addEventListener("click", async () => {
+    refillBtn.textContent = "⏳ 生成中...";
+    refillBtn.style.pointerEvents = "none";
+    try {
+      const { LiteratureReviewService } =
+        await import("./literatureReviewService");
+      const { DEFAULT_TABLE_TEMPLATE, DEFAULT_TABLE_FILL_PROMPT } =
+        await import("../utils/prompts");
+
+      const tableTemplate =
+        (getPref("tableTemplate" as any) as string) || DEFAULT_TABLE_TEMPLATE;
+      const fillPrompt =
+        (getPref("tableFillPrompt" as any) as string) ||
+        DEFAULT_TABLE_FILL_PROMPT;
+
+      // 先删除已有 AI-Table 笔记
+      const noteIDs = (item as any).getNotes?.() || [];
+      for (const nid of noteIDs) {
+        const note = await Zotero.Items.getAsync(nid);
+        if (!note) continue;
+        const tags: Array<{ tag: string }> = (note as any).getTags?.() || [];
+        if (tags.some((t) => t.tag === "AI-Table")) {
+          await note.eraseTx();
+          break;
+        }
+      }
+
+      // 找到 PDF 附件
+      const attachmentIDs = (item as any).getAttachments?.() || [];
+      for (const attId of attachmentIDs) {
+        const att = await Zotero.Items.getAsync(attId);
+        if (att && (att as any).isPDFAttachment?.()) {
+          const table = await LiteratureReviewService.fillTableForSinglePDF(
+            item,
+            att,
+            tableTemplate,
+            fillPrompt,
+          );
+          await LiteratureReviewService.saveTableNote(item, table);
+          break;
+        }
+      }
+
+      // 刷新内容
+      const tableContent = doc.getElementById(
+        "ai-butler-table-content",
+      ) as HTMLElement | null;
+      if (tableContent) {
+        await loadTableContent(item, tableContent);
+      }
+    } catch (err) {
+      ztoolkit.log("[AI-Butler] 重新填表失败:", err);
+    } finally {
+      refillBtn.textContent = "🔄 重新生成";
+      refillBtn.style.pointerEvents = "auto";
+    }
+  });
+  tableBtnContainer.appendChild(refillBtn);
+
+  const tableToggleIcon = doc.createElement("span");
+  tableToggleIcon.textContent = "▼";
+  tableToggleIcon.style.cssText = `
+    font-size: 10px;
+    color: inherit;
+    opacity: 0.6;
+    transition: transform 0.2s ease;
+  `;
+
+  tableHeader.appendChild(tableTitle);
+  tableHeader.appendChild(tableBtnContainer);
+  tableHeader.appendChild(tableToggleIcon);
+
+  // 内容区域
+  const DEFAULT_TABLE_HEIGHT = 150;
+  const tableContentWrapper = doc.createElement("div");
+  tableContentWrapper.style.cssText = `
+    position: relative;
+    height: ${DEFAULT_TABLE_HEIGHT}px;
+    min-height: 50px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    transition: height 0.2s ease;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  `;
+
+  const tableContentEl = doc.createElement("div");
+  tableContentEl.id = "ai-butler-table-content";
+  tableContentEl.style.cssText = `
+    padding: 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: break-word;
+    overflow-x: hidden;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    user-select: text;
+    cursor: text;
+  `;
+
+  tableContentWrapper.appendChild(tableContentEl);
+
+  // 折叠/展开
+  let isCollapsed = getPref("sidebarTableCollapsed" as any) === true;
+  if (isCollapsed) {
+    tableContentWrapper.style.height = "0px";
+    tableContentWrapper.style.overflow = "hidden";
+    tableToggleIcon.style.transform = "rotate(-90deg)";
+  }
+
+  tableHeader.addEventListener("click", () => {
+    isCollapsed = !isCollapsed;
+    setPref("sidebarTableCollapsed" as any, isCollapsed as any);
+    if (isCollapsed) {
+      tableContentWrapper.style.height = "0px";
+      tableContentWrapper.style.overflow = "hidden";
+      tableToggleIcon.style.transform = "rotate(-90deg)";
+    } else {
+      tableContentWrapper.style.height = `${DEFAULT_TABLE_HEIGHT}px`;
+      tableContentWrapper.style.overflowY = "auto";
+      tableToggleIcon.style.transform = "rotate(0deg)";
+    }
+  });
+
+  tableSection.appendChild(tableHeader);
+  tableSection.appendChild(tableContentWrapper);
+  body.appendChild(tableSection);
+
+  // 异步加载表格内容
+  loadTableContent(item, tableContentEl);
 }
 
 /**
@@ -1936,10 +2255,12 @@ async function loadNoteContent(
         // 1. 有 AI-Generated 标签 且 不是其他特殊类型
         // 2. 标题精确匹配 "<h2>AI 管家 - " 格式
         const hasAiGeneratedTag = tags.some((t) => t.tag === "AI-Generated");
+        const isTableNote = tags.some((t) => t.tag === "AI-Table");
         const isAiSummaryNote =
           !isMindmapNote &&
           !isImageSummaryNote &&
           !isChatNote &&
+          !isTableNote &&
           (hasAiGeneratedTag ||
             noteHtml.includes("<h2>AI 管家 - ") ||
             noteHtml.includes("[AI-Butler]"));

@@ -1,6 +1,9 @@
 import { getPref, setPref, clearPref } from "../utils/prefs";
 import {
   getDefaultSummaryPrompt,
+  getDefaultTableTemplate,
+  getDefaultTableFillPrompt,
+  getDefaultTableReviewPrompt,
   PROMPT_VERSION,
   shouldUpdatePrompt,
 } from "../utils/prompts";
@@ -216,6 +219,12 @@ function initializeDefaultPrefs() {
     stream: true,
     summaryPrompt: getDefaultSummaryPrompt(),
     promptVersion: PROMPT_VERSION,
+    // 文献综述表格填写相关
+    tableTemplate: getDefaultTableTemplate(),
+    tableFillPrompt: getDefaultTableFillPrompt(),
+    tableReviewPrompt: getDefaultTableReviewPrompt(),
+    enableTableOnSingleNote: true,
+    tableFillConcurrency: 3,
   };
 
   // 遍历所有默认配置
