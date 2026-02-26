@@ -899,7 +899,7 @@ function renderTableSection(
     align-items: center;
     gap: 6px;
   `;
-  tableTitle.innerHTML = `📊 <span>文献综述</span>`;
+  tableTitle.innerHTML = `📊 <span>表格归纳</span>`;
 
   // 异步加载综述状态徽章
   void (async () => {
@@ -934,7 +934,7 @@ function renderTableSection(
     if (badges) {
       const titleSpan = tableTitle.querySelector("span");
       if (titleSpan) {
-        titleSpan.innerHTML = `文献综述${badges}`;
+        titleSpan.innerHTML = `表格归纳${badges}`;
       }
     }
   })();
@@ -1050,10 +1050,19 @@ function renderTableSection(
 
   // 内容区域
   const DEFAULT_TABLE_HEIGHT = 150;
+  let savedTableHeight = parseInt(
+    (getPref("sidebarTableHeight" as any) as string) ||
+      String(DEFAULT_TABLE_HEIGHT),
+    10,
+  );
+  if (isNaN(savedTableHeight) || savedTableHeight < 50) {
+    savedTableHeight = DEFAULT_TABLE_HEIGHT;
+  }
+
   const tableContentWrapper = doc.createElement("div");
   tableContentWrapper.style.cssText = `
     position: relative;
-    height: ${DEFAULT_TABLE_HEIGHT}px;
+    height: ${savedTableHeight}px;
     min-height: 50px;
     overflow-y: auto;
     overflow-x: hidden;
@@ -1080,11 +1089,19 @@ function renderTableSection(
 
   tableContentWrapper.appendChild(tableContentEl);
 
+  // 拖拽调整高度的手柄
+  const tableResizeHandle = createResizeHandle(
+    doc,
+    tableContentWrapper,
+    "sidebarTableHeight",
+  );
+
   // 折叠/展开
   let isCollapsed = getPref("sidebarTableCollapsed" as any) === true;
   if (isCollapsed) {
     tableContentWrapper.style.height = "0px";
     tableContentWrapper.style.overflow = "hidden";
+    tableResizeHandle.style.display = "none";
     tableToggleIcon.style.transform = "rotate(-90deg)";
   }
 
@@ -1094,16 +1111,24 @@ function renderTableSection(
     if (isCollapsed) {
       tableContentWrapper.style.height = "0px";
       tableContentWrapper.style.overflow = "hidden";
+      tableResizeHandle.style.display = "none";
       tableToggleIcon.style.transform = "rotate(-90deg)";
     } else {
-      tableContentWrapper.style.height = `${DEFAULT_TABLE_HEIGHT}px`;
+      const restoreHeight = parseInt(
+        (getPref("sidebarTableHeight" as any) as string) ||
+          String(DEFAULT_TABLE_HEIGHT),
+        10,
+      );
+      tableContentWrapper.style.height = `${restoreHeight}px`;
       tableContentWrapper.style.overflowY = "auto";
+      tableResizeHandle.style.display = "flex";
       tableToggleIcon.style.transform = "rotate(0deg)";
     }
   });
 
   tableSection.appendChild(tableHeader);
   tableSection.appendChild(tableContentWrapper);
+  tableSection.appendChild(tableResizeHandle);
   body.appendChild(tableSection);
 
   // 异步加载表格内容

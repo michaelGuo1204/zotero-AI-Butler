@@ -19,3 +19,4 @@ itempane-ai-section-sidenav =
     .tooltiptext = AI 管家
 
 menuitem-literatureReview = AI管家文献综述
+menuitem-fillTable = AI管家填表

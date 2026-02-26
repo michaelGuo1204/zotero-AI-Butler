@@ -337,6 +337,8 @@ export class NoteGenerator {
             const fillPrompt =
               (getPref("tableFillPrompt" as any) as string) ||
               DEFAULT_TABLE_FILL_PROMPT;
+            const tableStrategy =
+              (getPref("tableStrategy" as any) as string) || "skip";
 
             // 获取 PDF 附件
             const noteIDs = (item as any).getAttachments?.() || [];
@@ -345,6 +347,12 @@ export class NoteGenerator {
                 try {
                   const att = await Zotero.Items.getAsync(attId);
                   if (att && att.isPDFAttachment?.()) {
+                    // skip 策略时先检查是否已有表格
+                    if (tableStrategy === "skip") {
+                      const existing =
+                        await LiteratureReviewService.findTableNote(item);
+                      if (existing) break;
+                    }
                     await LiteratureReviewService.fillTableForSinglePDF(
                       item,
                       att,

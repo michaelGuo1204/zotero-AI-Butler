@@ -29,6 +29,9 @@ import {
   DEFAULT_TABLE_REVIEW_PROMPT,
 } from "../utils/prompts";
 
+/** 表格笔记管理策略类型 */
+type TableStrategy = "skip" | "overwrite";
+
 /** AI-Table 标签名，用于标识文献填表笔记 */
 const TABLE_NOTE_TAG = "AI-Table";
 
@@ -268,29 +271,42 @@ export class LiteratureReviewService {
   /**
    * 保存填表结果为子笔记（AI-Table 标签）
    *
-   * 如果已存在 AI-Table 笔记，则跳过（不覆盖）
+   * 根据 tableStrategy 偏好决定行为：
+   * - skip（默认）：已存在 AI-Table 笔记时跳过
+   * - overwrite：删除旧的 AI-Table 笔记，重新创建
    *
    * @param item 文献条目
    * @param tableContent 填表的 Markdown 内容
-   * @returns 创建的笔记，或已存在的笔记
+   * @returns 创建的笔记，或已存在的笔记（skip 模式）
    */
   static async saveTableNote(
     item: Zotero.Item,
     tableContent: string,
   ): Promise<Zotero.Item> {
-    // 检查是否已有 AI-Table 笔记
-    const existingContent = await this.findTableNote(item);
-    if (existingContent) {
-      // 已存在则跳过，找到并返回已有笔记
-      const noteIDs = (item as any).getNotes?.() || [];
-      for (const nid of noteIDs) {
-        const note = await Zotero.Items.getAsync(nid);
-        if (!note) continue;
-        const tags: Array<{ tag: string }> = (note as any).getTags?.() || [];
-        if (tags.some((t) => t.tag === TABLE_NOTE_TAG)) {
-          return note;
-        }
+    const strategy: TableStrategy = ((getPref(
+      "tableStrategy" as any,
+    ) as string) || "skip") as TableStrategy;
+
+    // 查找已有的 AI-Table 笔记
+    const noteIDs = (item as any).getNotes?.() || [];
+    let existingNote: Zotero.Item | null = null;
+    for (const nid of noteIDs) {
+      const note = await Zotero.Items.getAsync(nid);
+      if (!note) continue;
+      const tags: Array<{ tag: string }> = (note as any).getTags?.() || [];
+      if (tags.some((t) => t.tag === TABLE_NOTE_TAG)) {
+        existingNote = note;
+        break;
       }
+    }
+
+    // 根据策略处理已有笔记
+    if (existingNote) {
+      if (strategy === "skip") {
+        return existingNote;
+      }
+      // overwrite: 删除旧笔记
+      await (existingNote as any).eraseTx?.();
     }
 
     // 创建新的填表笔记
@@ -437,9 +453,9 @@ export class LiteratureReviewService {
           0,
           80,
         );
-        label = `> **文献 ${index}**: ${title} (${author}, ${year})`;
+        label = `> **[${index}] 文献**: ${title} (${author}, ${year})`;
       } else {
-        label = `> **文献 ${index}**`;
+        label = `> **[${index}] 文献**`;
       }
 
       const { header, dataRows, nonTableContent } =
@@ -498,24 +514,32 @@ export class LiteratureReviewService {
     const total = items.length;
     const queue = [...items];
 
+    const strategy: TableStrategy = ((getPref(
+      "tableStrategy" as any,
+    ) as string) || "skip") as TableStrategy;
+
     const worker = async () => {
       while (queue.length > 0) {
         const task = queue.shift()!;
         try {
-          // 先查缓存
-          const existing = await this.findTableNote(task.parentItem);
-          if (existing) {
-            results.set(task.parentItem.id, existing);
-          } else {
-            const table = await this.fillTableForSinglePDF(
-              task.parentItem,
-              task.pdfAttachment,
-              tableTemplate,
-              fillPrompt,
-            );
-            await this.saveTableNote(task.parentItem, table);
-            results.set(task.parentItem.id, table);
+          // skip 策略时先查缓存，overwrite 策略时跳过缓存直接重新填表
+          if (strategy === "skip") {
+            const existing = await this.findTableNote(task.parentItem);
+            if (existing) {
+              results.set(task.parentItem.id, existing);
+              completed++;
+              progressCallback?.(completed, total);
+              continue;
+            }
           }
+          const table = await this.fillTableForSinglePDF(
+            task.parentItem,
+            task.pdfAttachment,
+            tableTemplate,
+            fillPrompt,
+          );
+          await this.saveTableNote(task.parentItem, table);
+          results.set(task.parentItem.id, table);
         } catch (error) {
           ztoolkit.log(
             `[AI-Butler] 填表失败: ${task.parentItem.getField("title")}`,
@@ -915,12 +939,12 @@ export class LiteratureReviewService {
   /**
    * 后处理综述正文中的引用标记，转换为 Zotero 链接
    *
-   * 匹配 LLM 自然生成的 (Author, Year) 格式引用，
-   * 基于文献元数据（作者姓氏/年份）进行模糊匹配，
+   * 匹配 LLM 生成的 [num] 格式引用（如 [1]、[2]），
+   * 基于 aggregateTableContents 中的文献编号构建序号 → item 映射，
    * 将匹配成功的引用转换为 zotero://select 可点击链接。
    *
    * @param content 综述正文
-   * @param itemPdfPairs 文献条目列表
+   * @param itemPdfPairs 文献条目列表（顺序与 aggregateTableContents 中的编号一致）
    * @returns 处理后的正文
    */
   static async postProcessCitations(
@@ -930,118 +954,33 @@ export class LiteratureReviewService {
       pdfAttachment: Zotero.Item;
     }>,
   ): Promise<string> {
-    // 构建作者+年份 → item 的查找表
-    // key 格式: "surname|year" (小写)
-    const authorYearMap = new Map<
-      string,
-      { item: Zotero.Item; key: string; uri: string }
-    >();
+    if (itemPdfPairs.length === 0) return content;
 
-    for (const { parentItem } of itemPdfPairs) {
-      const creators = (parentItem as any).getCreators?.() || [];
+    // 构建序号 → Zotero URI 的映射（序号从 1 开始，与 aggregateTableContents 一致）
+    const numToUri = new Map<number, string>();
+    itemPdfPairs.forEach(({ parentItem }, idx) => {
       const itemKey = (parentItem as any).key || "";
-      const uri = `zotero://select/library/items/${itemKey}`;
-      const dateStr = (parentItem.getField("date") as string) || "";
-      const yearMatch = dateStr.match(/(\d{4})/);
-      const year = yearMatch ? yearMatch[1] : "";
-
-      if (!year || creators.length === 0) continue;
-
-      // 注册所有作者的姓氏（支持多作者匹配）
-      for (const creator of creators) {
-        let surname = "";
-        if (creator.lastName) {
-          surname = creator.lastName.trim();
-        } else if (creator.name) {
-          // 单字段格式如 "F. Begarin"，取最后一个词作为姓氏
-          const nameParts = creator.name.trim().split(/\s+/);
-          surname = nameParts[nameParts.length - 1];
-        }
-        if (!surname) continue;
-
-        const lookupKey = `${surname.toLowerCase()}|${year}`;
-        if (!authorYearMap.has(lookupKey)) {
-          authorYearMap.set(lookupKey, { item: parentItem, key: itemKey, uri });
-        }
+      if (itemKey) {
+        numToUri.set(idx + 1, `zotero://select/library/items/${itemKey}`);
       }
-    }
+    });
 
-    if (authorYearMap.size === 0) return content;
+    if (numToUri.size === 0) return content;
 
-    // 匹配 (Author, Year)、(Author et al., Year)、(Author and Author, Year) 等
-    // 正则: 括号内以字母开头，包含逗号分隔的年份
-    let result = content;
-    result = result.replace(
-      /\(([^()]{2,80}?,\s*\d{4}[a-z]?)\)/g,
-      (fullMatch, inner: string) => {
-        // 提取年份
-        const yearMatch = inner.match(/(\d{4})[a-z]?\s*$/);
-        if (!yearMatch) return fullMatch;
-        const year = yearMatch[1];
-
-        // 提取作者部分（逗号前面的内容）
-        const authorPart = inner.replace(/,\s*\d{4}[a-z]?\s*$/, "").trim();
-
-        // 尝试从作者部分提取姓氏
-        // 处理 "Author et al." → "Author"
-        // 处理 "Author and Author" → 取第一个
-        // 处理 "Author" → 直接使用
-        let surname = authorPart
-          .replace(/\s+et\s+al\.?$/i, "")
-          .replace(/\s+and\s+.+$/i, "")
-          .replace(/\s+&\s+.+$/i, "")
-          .trim();
-
-        // 如果包含空格，取最后一个词作为姓氏（"First Last" → "Last"）
-        // 但如果是单个词则直接使用
-        const parts = surname.split(/\s+/);
-        if (parts.length > 1) {
-          surname = parts[parts.length - 1];
+    // 匹配 [N] 格式引用，将其转换为 Markdown 链接
+    // 匹配规则：方括号内为纯数字，如 [1]、[12]
+    // 使用负向前瞻排除已经是 Markdown 链接的情况 [N](url)
+    const result = content.replace(
+      /\[(\d+)\](?!\()/g,
+      (fullMatch, numStr: string) => {
+        const num = parseInt(numStr, 10);
+        const uri = numToUri.get(num);
+        if (uri) {
+          return `[[${numStr}]](${uri})`;
         }
-
-        const lookupKey = `${surname.toLowerCase()}|${year}`;
-        const match = authorYearMap.get(lookupKey);
-
-        if (match) {
-          return `[(${inner})](${match.uri})`;
-        }
-
         return fullMatch;
       },
     );
-
-    // 模式2: Author (Year) / Author et al. (Year) / Author and Author (Year)
-    // 叙述性引用格式，如 "Nicoleau (2014)" "Nicoleau et al. (2014)"
-    result = result.replace(
-      /(?<!\[)\b([A-Z][a-zA-Zà-öø-ÿÀ-ÖØ-Ý\-']+(?:\s+(?:et\s+al\.?|and|&)\s+[A-Za-zà-öø-ÿÀ-ÖØ-Ý\-']+)?)\s+\((\d{4}[a-z]?)\)(?!\])/g,
-      (fullMatch, authorText: string, yearWithSuffix: string) => {
-        const year = yearWithSuffix.slice(0, 4);
-
-        // 提取第一作者姓氏
-        let surname = authorText
-          .replace(/\s+et\s+al\.?$/i, "")
-          .replace(/\s+(and|&)\s+.+$/i, "")
-          .trim();
-
-        // 取最后一个词作为姓氏
-        const parts = surname.split(/\s+/);
-        if (parts.length > 1) {
-          surname = parts[parts.length - 1];
-        }
-
-        const lookupKey = `${surname.toLowerCase()}|${year}`;
-        const match = authorYearMap.get(lookupKey);
-
-        if (match) {
-          return `[${authorText} (${yearWithSuffix})](${match.uri})`;
-        }
-
-        return fullMatch;
-      },
-    );
-
-    // 清理残留的 [itemId:N] 标记（如果 LLM 仍然生成了的话）
-    result = result.replace(/\[itemId:\d+\]/g, "");
 
     return result;
   }

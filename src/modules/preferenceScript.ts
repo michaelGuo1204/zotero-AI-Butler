@@ -224,6 +224,7 @@ function initializeDefaultPrefs() {
     tableFillPrompt: getDefaultTableFillPrompt(),
     tableReviewPrompt: getDefaultTableReviewPrompt(),
     enableTableOnSingleNote: true,
+    tableStrategy: "skip",
     tableFillConcurrency: 3,
   };
 
