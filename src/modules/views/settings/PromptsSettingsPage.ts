@@ -7,6 +7,9 @@
 import { getPref, setPref, clearPref } from "../../../utils/prefs";
 import {
   getDefaultSummaryPrompt,
+  getDefaultTableTemplate,
+  getDefaultTableFillPrompt,
+  getDefaultTableReviewPrompt,
   PROMPT_VERSION,
   parseMultiRoundPrompts,
   getDefaultMultiRoundPrompts,
@@ -415,6 +418,9 @@ export class PromptsSettingsPage {
 
     // 初次渲染时也做一次预览
     this.updatePreview();
+
+    // =========== 文献综述表格设置 ===========
+    this.renderTableSettings(contentWrapper);
   }
 
   // ===== helpers =====
@@ -970,5 +976,185 @@ export class PromptsSettingsPage {
     new ztoolkit.ProgressWindow("提示词")
       .createLine({ text: "✅ 已恢复默认多轮提示词", type: "success" })
       .show();
+  }
+
+  // =========== 文献综述表格设置 ===========
+
+  /**
+   * 渲染文献综述表格设置区域
+   */
+  private renderTableSettings(contentWrapper: HTMLElement): void {
+    const doc = Zotero.getMainWindow().document;
+
+    contentWrapper.appendChild(createSectionTitle("📊 文献综述表格设置"));
+
+    contentWrapper.appendChild(
+      createNotice(
+        "配置文献综述的表格模板和提示词。综述流程：先逐篇论文按模板填表，再汇总表格生成综述。",
+        "info",
+      ),
+    );
+
+    const tableSection = doc.createElement("div");
+    Object.assign(tableSection.style, {
+      padding: "16px",
+      background: "var(--ai-input-bg)",
+      borderRadius: "8px",
+      border: "1px solid var(--ai-input-border)",
+      marginBottom: "24px",
+    });
+
+    // 1. 表格模板编辑
+    const currentTemplate =
+      (getPref("tableTemplate" as any) as string) || getDefaultTableTemplate();
+    const templateEditor = createTextarea(
+      "table-template-editor",
+      currentTemplate,
+      10,
+      "输入 Markdown 格式的表格模板...",
+    );
+    tableSection.appendChild(
+      createFormGroup(
+        "表格模板 (Markdown)",
+        templateEditor,
+        "定义每篇论文需要填写的结构化维度",
+      ),
+    );
+
+    // 2. 填表提示词
+    const currentFillPrompt =
+      (getPref("tableFillPrompt" as any) as string) ||
+      getDefaultTableFillPrompt();
+    const fillPromptEditor = createTextarea(
+      "table-fill-prompt-editor",
+      currentFillPrompt,
+      8,
+      "输入逐篇论文填表的提示词...",
+    );
+    tableSection.appendChild(
+      createFormGroup(
+        "逐篇填表提示词",
+        fillPromptEditor,
+        "指导 LLM 阅读单篇论文并填写表格。可用变量: ${tableTemplate}",
+      ),
+    );
+
+    // 3. 汇总综述提示词
+    const currentReviewPrompt =
+      (getPref("tableReviewPrompt" as any) as string) ||
+      getDefaultTableReviewPrompt();
+    const reviewPromptEditor = createTextarea(
+      "table-review-prompt-editor",
+      currentReviewPrompt,
+      8,
+      "输入基于汇总表生成综述的提示词...",
+    );
+    tableSection.appendChild(
+      createFormGroup(
+        "汇总综述提示词",
+        reviewPromptEditor,
+        "基于所有文献的填表结果生成综合文献综述",
+      ),
+    );
+
+    // 4. 单篇笔记时额外填表开关
+    const enableTableOnSingle =
+      (getPref("enableTableOnSingleNote" as any) as boolean) ?? true;
+    const enableTableCheckbox = createCheckbox(
+      "enable-table-on-single",
+      enableTableOnSingle,
+    );
+    enableTableCheckbox.addEventListener("click", () => {
+      const checkbox = enableTableCheckbox.querySelector(
+        "input",
+      ) as HTMLInputElement;
+      if (checkbox) {
+        setPref("enableTableOnSingleNote" as any, checkbox.checked as any);
+      }
+    });
+    tableSection.appendChild(
+      createFormGroup(
+        "生成笔记时额外填表",
+        enableTableCheckbox,
+        "开启后，生成单篇文献笔记时将异步并行生成填表数据",
+      ),
+    );
+
+    // 5. 并行任务量控制
+    const currentConcurrency =
+      (getPref("tableFillConcurrency" as any) as number) || 3;
+    const concurrencyInput = createInput(
+      "table-fill-concurrency",
+      "number",
+      String(currentConcurrency),
+      "1-10",
+    );
+    concurrencyInput.min = "1";
+    concurrencyInput.max = "10";
+    concurrencyInput.style.width = "80px";
+    concurrencyInput.addEventListener("change", () => {
+      let val = parseInt(concurrencyInput.value, 10);
+      if (isNaN(val) || val < 1) val = 1;
+      if (val > 10) val = 10;
+      concurrencyInput.value = String(val);
+      setPref("tableFillConcurrency" as any, val as any);
+    });
+    tableSection.appendChild(
+      createFormGroup(
+        "并行填表任务数",
+        concurrencyInput,
+        "同时并行处理的最大文献填表数量 (1-10)",
+      ),
+    );
+
+    // 6. 保存 / 恢复默认 按钮
+    const tableBtnRow = doc.createElement("div");
+    Object.assign(tableBtnRow.style, {
+      display: "flex",
+      gap: "12px",
+      marginTop: "16px",
+    });
+
+    const btnSaveTable = createStyledButton("💾 保存表格设置", "#4caf50");
+    btnSaveTable.addEventListener("click", () => {
+      setPref("tableTemplate" as any, templateEditor.value as any);
+      setPref("tableFillPrompt" as any, fillPromptEditor.value as any);
+      setPref("tableReviewPrompt" as any, reviewPromptEditor.value as any);
+      new ztoolkit.ProgressWindow("提示词")
+        .createLine({ text: "✅ 表格设置已保存", type: "success" })
+        .show();
+    });
+
+    const btnResetTable = createStyledButton("🔄 恢复默认", "#9e9e9e");
+    btnResetTable.addEventListener("click", () => {
+      const ok = Services.prompt.confirm(
+        Zotero.getMainWindow() as any,
+        "恢复默认",
+        "确定将表格设置恢复为默认吗?",
+      );
+      if (!ok) return;
+      templateEditor.value = getDefaultTableTemplate();
+      fillPromptEditor.value = getDefaultTableFillPrompt();
+      reviewPromptEditor.value = getDefaultTableReviewPrompt();
+      setPref("tableTemplate" as any, getDefaultTableTemplate() as any);
+      setPref("tableFillPrompt" as any, getDefaultTableFillPrompt() as any);
+      setPref("tableReviewPrompt" as any, getDefaultTableReviewPrompt() as any);
+      setPref("enableTableOnSingleNote" as any, true as any);
+      setPref("tableFillConcurrency" as any, 3 as any);
+      const checkbox = enableTableCheckbox.querySelector(
+        "input",
+      ) as HTMLInputElement;
+      if (checkbox) checkbox.checked = true;
+      concurrencyInput.value = "3";
+      new ztoolkit.ProgressWindow("提示词")
+        .createLine({ text: "✅ 表格设置已恢复默认", type: "success" })
+        .show();
+    });
+
+    tableBtnRow.appendChild(btnSaveTable);
+    tableBtnRow.appendChild(btnResetTable);
+    tableSection.appendChild(tableBtnRow);
+
+    contentWrapper.appendChild(tableSection);
   }
 }

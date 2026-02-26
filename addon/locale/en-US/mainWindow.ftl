@@ -16,3 +16,4 @@ itempane-ai-section-sidenav =
     .tooltiptext = AI Butler
 
 menuitem-literatureReview = AI Butler Literature Review
+menuitem-fillTable = AI Butler Fill Table

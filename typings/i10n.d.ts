@@ -31,6 +31,7 @@ export type FluentMessageId =
   | 'library-toolbar-ai-butler'
   | 'menuitem-chatWithAI'
   | 'menuitem-filemenulabel'
+  | 'menuitem-fillTable'
   | 'menuitem-generateSummary'
   | 'menuitem-imageSummary'
   | 'menuitem-label'

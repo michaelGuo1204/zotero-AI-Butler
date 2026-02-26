@@ -34,6 +34,8 @@ import { marked } from "marked";
 import {
   parseMultiRoundPrompts,
   getDefaultMultiRoundFinalPrompt,
+  DEFAULT_TABLE_TEMPLATE,
+  DEFAULT_TABLE_FILL_PROMPT,
   type MultiRoundPromptItem,
   type SummaryMode,
 } from "../utils/prompts";
@@ -292,7 +294,11 @@ export class NoteGenerator {
       }
 
       // 格式化笔记内容,添加标题和样式
-      const noteContent = this.formatNoteContent(itemTitle, fullContent);
+      const noteContent = this.formatNoteContent(
+        itemTitle,
+        fullContent,
+        "AI 总结",
+      );
 
       if (existing) {
         // 覆盖或追加到已有笔记
@@ -317,6 +323,56 @@ export class NoteGenerator {
 
       // 通知进度回调完成 (100%)
       progressCallback?.("完成！", 100);
+
+      // 异步并行填表（不阻塞笔记返回）
+      const enableTable =
+        (getPref("enableTableOnSingleNote" as any) as boolean) ?? true;
+      if (enableTable) {
+        // 延迟导入以避免循环依赖
+        import("./literatureReviewService")
+          .then(({ LiteratureReviewService }) => {
+            const tableTemplate =
+              (getPref("tableTemplate" as any) as string) ||
+              DEFAULT_TABLE_TEMPLATE;
+            const fillPrompt =
+              (getPref("tableFillPrompt" as any) as string) ||
+              DEFAULT_TABLE_FILL_PROMPT;
+            const tableStrategy =
+              (getPref("tableStrategy" as any) as string) || "skip";
+
+            // 获取 PDF 附件
+            const noteIDs = (item as any).getAttachments?.() || [];
+            void (async () => {
+              for (const attId of noteIDs) {
+                try {
+                  const att = await Zotero.Items.getAsync(attId);
+                  if (att && att.isPDFAttachment?.()) {
+                    // skip 策略时先检查是否已有表格
+                    if (tableStrategy === "skip") {
+                      const existing =
+                        await LiteratureReviewService.findTableNote(item);
+                      if (existing) break;
+                    }
+                    await LiteratureReviewService.fillTableForSinglePDF(
+                      item,
+                      att,
+                      tableTemplate,
+                      fillPrompt,
+                    ).then((table) =>
+                      LiteratureReviewService.saveTableNote(item, table),
+                    );
+                    break; // 只用第一个 PDF
+                  }
+                } catch (e) {
+                  ztoolkit.log("[AI-Butler] 额外填表失败:", e);
+                }
+              }
+            })();
+          })
+          .catch((e) => {
+            ztoolkit.log("[AI-Butler] 加载填表服务失败:", e);
+          });
+      }
 
       // 返回创建的笔记对象和内容
       return { note, content: fullContent };
@@ -346,9 +402,10 @@ export class NoteGenerator {
         if (!n) continue;
         const tags: Array<{ tag: string }> = (n as any).getTags?.() || [];
         const hasTag = tags.some((t) => t.tag === "AI-Generated");
+        const hasTableTag = tags.some((t) => t.tag === "AI-Table");
         const noteHtml: string = (n as any).getNote?.() || "";
         const titleMatch = /<h2>\s*AI 管家\s*-/.test(noteHtml);
-        if (hasTag || titleMatch) {
+        if (!hasTableTag && (hasTag || titleMatch)) {
           if (!target) target = n;
           else {
             const a = (target as any).dateModified || 0;
@@ -386,7 +443,11 @@ export class NoteGenerator {
    * // 返回: <h2>AI 管家 - 深度学习综述</h2><div>...</div>
    * ```
    */
-  public static formatNoteContent(itemTitle: string, summary: string): string {
+  public static formatNoteContent(
+    itemTitle: string,
+    summary: string,
+    prefix: string = "",
+  ): string {
     // 将 Markdown 转换为笔记格式的 HTML
     const htmlContent = this.convertMarkdownToNoteHTML(summary);
 
@@ -399,8 +460,13 @@ export class NoteGenerator {
       truncatedTitle = truncatedTitle.substring(0, maxTitleLength) + "...";
     }
 
+    // 组装标题：有前缀则 "前缀 - 标题"，无前缀则直接用标题
+    const heading = prefix
+      ? `${this.escapeHtml(prefix)} - ${this.escapeHtml(truncatedTitle)}`
+      : this.escapeHtml(truncatedTitle);
+
     // 添加标题头部和内容包装
-    return `<h2>AI 管家 - ${this.escapeHtml(truncatedTitle)}</h2>
+    return `<h2>${heading}</h2>
 <div>${htmlContent}</div>`;
   }
 

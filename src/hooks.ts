@@ -436,6 +436,23 @@ function registerContextMenuItem() {
     },
     getVisibility: () => true, // 分类菜单始终显示
   });
+
+  // 注册"AI管家填表"菜单项 (文献右键)
+  ztoolkit.Menu.register("item", {
+    tag: "menuitem",
+    label: getString("menuitem-fillTable" as any),
+    icon: menuIcon,
+    commandListener: async () => {
+      await handleFillTable();
+    },
+    getVisibility: () => {
+      const selectedItems = Zotero.getActiveZoteroPane().getSelectedItems();
+      return (
+        selectedItems?.every((item: Zotero.Item) => item.isRegularItem()) ||
+        false
+      );
+    },
+  });
 }
 
 /**
@@ -1248,6 +1265,65 @@ async function handleLiteratureReview() {
     })
       .createLine({
         text: `打开文献综述失败: ${error.message || error}`,
+        type: "error",
+      })
+      .show();
+  }
+}
+
+/**
+ * 处理填表请求
+ *
+ * 当用户在文献右键点击"AI管家填表"时触发
+ * 为选中文献的 PDF 附件进行填表
+ */
+async function handleFillTable() {
+  const items = Zotero.getActiveZoteroPane().getSelectedItems();
+  if (!items || items.length === 0) {
+    new ztoolkit.ProgressWindow("AI Butler", {
+      closeOnClick: true,
+      closeTime: 3000,
+    })
+      .createLine({ text: "请先选择要填表的文献", type: "error" })
+      .show();
+    return;
+  }
+
+  try {
+    const { TaskQueueManager } = await import("./modules/taskQueue");
+    const manager = TaskQueueManager.getInstance();
+
+    for (const item of items) {
+      if (!item.isRegularItem()) continue;
+      await manager.addTableFillTask(item);
+    }
+
+    // 打开主窗口并切换到任务队列标签页
+    const mainWin = MainWindow.getInstance();
+    await mainWin.open("tasks");
+    try {
+      mainWin.getTaskQueueView().refresh();
+    } catch (e) {
+      ztoolkit.log("[AI-Butler] 刷新任务队列视图失败:", e);
+    }
+
+    new ztoolkit.ProgressWindow("AI Butler", {
+      closeOnClick: true,
+      closeTime: 4000,
+    })
+      .createLine({
+        text: `📋 已加入队列: ${items.length} 篇文献填表任务`,
+        type: "success",
+      })
+      .show();
+  } catch (error: any) {
+    ztoolkit.log("[AI-Butler] 填表失败:", error);
+    new ztoolkit.ProgressWindow("AI Butler", {
+      closeOnClick: true,
+      closeTime: 5000,
+    })
+      .createLine({
+        text: `❌ 填表失败: ${error.message || error}`,
         type: "error",
       })
       .show();

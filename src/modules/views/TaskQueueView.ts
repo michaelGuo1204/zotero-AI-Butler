@@ -293,6 +293,8 @@ export class TaskQueueView extends BaseView {
       { label: "📝 论文总结", value: "summary" as TaskType | "all" },
       { label: "🖼️ 一图总结", value: "imageSummary" as TaskType | "all" },
       { label: "🧠 思维导图", value: "mindmap" as TaskType | "all" },
+      { label: "📊 填表", value: "tableFill" as TaskType | "all" },
+      { label: "📝 综述", value: "review" as TaskType | "all" },
     ];
 
     typeButtons.forEach((btn) => {
@@ -564,6 +566,34 @@ export class TaskQueueView extends BaseView {
       });
       taskHeader.appendChild(typeBadge);
     }
+    if (task.taskType === "tableFill") {
+      const typeBadge = this.createElement("span", {
+        styles: {
+          fontSize: "11px",
+          padding: "2px 8px",
+          borderRadius: "10px",
+          backgroundColor: "#ff9800",
+          color: "white",
+          marginLeft: "8px",
+        },
+        textContent: "📊 填表",
+      });
+      taskHeader.appendChild(typeBadge);
+    }
+    if (task.taskType === "review") {
+      const typeBadge = this.createElement("span", {
+        styles: {
+          fontSize: "11px",
+          padding: "2px 8px",
+          borderRadius: "10px",
+          backgroundColor: "#2196f3",
+          color: "white",
+          marginLeft: "8px",
+        },
+        textContent: "📝 综述",
+      });
+      taskHeader.appendChild(typeBadge);
+    }
 
     // 任务信息
     const taskInfo = this.createElement("div", {
@@ -578,6 +608,9 @@ export class TaskQueueView extends BaseView {
         ${task.error ? `<br/><span style="color: #f44336;">错误: ${task.error}</span>` : ""}
         ${task.retryCount > 0 ? `<br/>重试次数: ${task.retryCount}` : ""}
         ${isImageSummary && task.workflowStage ? `<br/><strong style="color: #9c27b0;">阶段: ${task.workflowStage}</strong>` : ""}
+        ${isMindmap && task.workflowStage ? `<br/><strong style="color: #4caf50;">阶段: ${task.workflowStage}</strong>` : ""}
+        ${task.taskType === "tableFill" && task.workflowStage ? `<br/><strong style="color: #ff9800;">阶段: ${task.workflowStage}</strong>` : ""}
+        ${task.taskType === "review" && task.workflowStage ? `<br/><strong style="color: #2196f3;">阶段: ${task.workflowStage}</strong>` : ""}
       `,
     });
 

@@ -102,6 +102,26 @@ export class UiSettingsPage {
       ),
     );
 
+    // 表格管理策略
+    const tablePolicy = (
+      (getPref("tableStrategy" as any) as string) || "skip"
+    ).toString();
+    const tablePolicySelect = createSelect(
+      "tablePolicy",
+      [
+        { value: "skip", label: "跳过(默认)" },
+        { value: "overwrite", label: "覆盖" },
+      ],
+      tablePolicy,
+    );
+    form.appendChild(
+      createFormGroup(
+        "已有 AI 表格时的策略",
+        tablePolicySelect,
+        "当检测到条目已有 AI 填表笔记时该如何处理",
+      ),
+    );
+
     // Markdown 笔记样式主题
     const currentTheme = (
       (getPref("markdownTheme" as any) as string) || "github"
@@ -146,6 +166,9 @@ export class UiSettingsPage {
       const policyVal = (policySelect as any).getValue
         ? (policySelect as any).getValue()
         : policy;
+      const tablePolicyVal = (tablePolicySelect as any).getValue
+        ? (tablePolicySelect as any).getValue()
+        : tablePolicy;
       const themeVal = (themeSelect as any).getValue
         ? (themeSelect as any).getValue()
         : currentTheme;
@@ -154,6 +177,7 @@ export class UiSettingsPage {
       setPref("autoScan", !!autoScanVal as any);
       setPref("saveChatHistory", !!saveChatHistoryVal as any);
       setPref("noteStrategy" as any, policyVal);
+      setPref("tableStrategy" as any, tablePolicyVal);
       setPref("markdownTheme" as any, themeVal);
 
       // 清除主题缓存以便下次加载新主题
@@ -175,6 +199,7 @@ export class UiSettingsPage {
       setPref("autoScan", true as any);
       setPref("saveChatHistory", true as any);
       setPref("noteStrategy" as any, "skip");
+      setPref("tableStrategy" as any, "skip");
       AutoScanManager.getInstance().reload();
       this.render();
       new ztoolkit.ProgressWindow("界面设置")
