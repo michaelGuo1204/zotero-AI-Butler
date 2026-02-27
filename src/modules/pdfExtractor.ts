@@ -20,6 +20,8 @@
  * @author AI-Butler Team
  */
 
+import { getPref } from "../utils/prefs";
+
 /**
  * PDF文本提取器类
  *
@@ -208,6 +210,28 @@ export class PDFExtractor {
     ztoolkit.log(
       `[AI Butler] Selected oldest PDF: ${pdfAttachment.getField("title")} (Added: ${pdfAttachment.dateAdded})`,
     );
+
+    // [New] MinerU API Integration Hook
+    const currentPdfMode = (getPref("pdfProcessMode") as string) || "base64";
+    const mineruApiKey = (getPref("mineruApiKey") as string) || "";
+    if (
+      currentPdfMode === "mineru" &&
+      mineruApiKey &&
+      mineruApiKey.trim().length > 0
+    ) {
+      ztoolkit.log(
+        "[AI Butler] MinerU pdf process mode selected and API Key detected, routing to MineruClient for extraction...",
+      );
+      try {
+        const { MineruClient } = await import("./mineruIntegration");
+        return await MineruClient.extractMarkdown(item);
+      } catch (e) {
+        ztoolkit.log(
+          "[AI Butler] MinerU extraction failed, returning to Zotero built-in extraction",
+          e,
+        );
+      }
+    }
 
     // 第三步:从 PDF 附件中提取文本
     const text = await this.extractTextFromPDF(pdfAttachment);
