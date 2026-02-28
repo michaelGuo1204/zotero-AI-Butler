@@ -1,10 +1,40 @@
+/**
+ * ================================================================
+ * MinerU OCR 交互模块
+ * ================================================================
+ *
+ * 本模块提供与 MinerU API 的交互功能
+ *
+ * 主要职责: 利用 MinerU OCR API 从PDF文件中提取文本
+ *
+ * 技术实现:
+ * - 使用 MinerU API 进行 PDF OCR 提取
+ * - 通过 API 返回的 zip 文件提取 Markdown 内容
+ *
+ * @module mineruIntegration
+ * @author AI-Butler Team
+ */
+
 import { getPref } from "../utils/prefs";
 import { PDFExtractor } from "./pdfExtractor";
 import JSZip from "jszip";
 
 /**
- * MineruClient handles the Zotero to MinerU API interaction.
- * It uses the 'let it crash' pattern for parsing the somewhat undocumented batch API response.
+ * MinerU Wrapper
+ *
+ * 调用逻辑
+ * 1. 构建OCR上传路径
+ * 2. 上传PDF文件
+ * 3. 获取并下载解析结果
+ * 4. 提取Markdown
+ * 
+ * 错误处理：
+ * - API 调用失败: 包含 API 错误详情
+ * - PDF 提取失败: 抛出明确的错误信息
+ * 
+ * @param item Zotero Item
+ * @returns Markdown content
+ * @throws 当任何步骤失败时抛出错误
  */
 export class MineruClient {
     /**
